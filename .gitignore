@@ -5,3 +5,6 @@ venv/
 dist/
 build/
 *.egg-info/
+
+# graphify build state — regenerable, never committed
+graphify-out/
