@@ -20,7 +20,7 @@ answers with the worktree, which is the defect `.agent/workspace.py` was written
 | 3 | `.agent/keys/<ns>.md` | The distilled summary for one key — usually enough to act on. |
 | 4 | the source the key names | Only when the summary is not enough. |
 
-Cite keys namespaced (`estate:AD-7`), never bare — every spine in the estate reaches `AD-1`.
+Cite keys namespaced (`estate:AD-7`), never bare — a bare `AD-N` is ambiguous across spines.
 
 The KB answers **why**. For **where is X / what calls X / what breaks if I change X**, use the
 code graph — it is derived from the AST, so it cannot be out of date with the code.
