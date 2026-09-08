@@ -36,11 +36,24 @@ class UnifiedMessageBroker:
         pull_timeout: float = 1.0,
         registry: Optional[HandlerRegistry] = None,
         client: Optional[UnifiedMessaging] = None,
+        queue_group: Optional[str] = None,
     ) -> None:
-        self.subjects = [s.strip() for s in (subjects or []) if s and s.strip()] or [
-            "notifications.>"
-        ]
+        # An empty subject list means "subscribe to nothing". This used to fall
+        # back to ["notifications.>"], so any service that declared no core
+        # subjects silently subscribed to the entire notifications tree — and
+        # every lifespan invented a "__<service>_internal.none" placeholder
+        # subject purely to stop that firing. Both are gone; start() already
+        # handles the empty case. See B2b in
+        # .agent/planning/replica-safety-nats-investigation.md.
+        self.subjects = [s.strip() for s in (subjects or []) if s and s.strip()]
         self.service_name = service_name
+        # Core NATS subscriptions and RPC responders join a queue group so that
+        # ONE replica handles each message, instead of every replica receiving
+        # every message (plain fan-out) and N responders answering one request.
+        # Defaults to the service name: each service forms its own group, which
+        # is the load-balancing unit. Pass an explicit value only to split a
+        # service's replicas into separate groups on purpose.
+        self.queue_group = queue_group or service_name
         self.registry = registry or _default_registry
         self._consumers = consumers or []
         self._pull_batch = pull_batch
@@ -62,15 +75,25 @@ class UnifiedMessageBroker:
         if self._started:
             logger.info("Broker already running; skip start.")
             return
-        if not self.subjects:
-            logger.info("No subjects configured; listener disabled.")
-            self._started = True
-            return
-
+        # Connect unconditionally. There used to be an early return when
+        # ``self.subjects`` was empty, unreachable only because the removed
+        # ["notifications.>"] fallback made that list never empty. Returning
+        # here leaves ``_started`` true with no connection behind it, so a
+        # broker that only publishes or serves RPC — nothing inbound to
+        # subscribe to — fails on a None client at its first call. Having
+        # nothing to listen on is not a reason not to connect; both loops
+        # below are simply empty. See B2b in
+        # .agent/planning/replica-safety-nats-investigation.md.
         await self.client.start()
+        if not self.subjects and not self._consumers:
+            logger.info("No subjects or consumers configured; nothing to listen on.")
         for subject in self.subjects:
-            await self.client.subscribe(subject, self._on_message)
-            logger.info("Subscribed to '%s'", subject)
+            await self.client.subscribe(
+                subject, self._on_message, queue=self.queue_group
+            )
+            logger.info(
+                "Subscribed to '%s' (queue=%s)", subject, self.queue_group
+            )
 
         # Start JetStream durable consumers
         for consumer in self._consumers:
@@ -119,7 +142,7 @@ class UnifiedMessageBroker:
                 payload = data
             return await handler(payload, meta)
 
-        await self.client.reply(subject, _on_req)
+        await self.client.reply(subject, _on_req, queue=self.queue_group)
 
     # ── JetStream Consumer Runner ────────────────────────────────────
 

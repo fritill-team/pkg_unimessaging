@@ -26,6 +26,7 @@ async def start_messaging(
     pull_batch: int = 10,
     pull_timeout: float = 1.0,
     registry: Optional[HandlerRegistry] = None,
+    queue_group: Optional[str] = None,
 ) -> UnifiedMessageBroker:
     """Create and start a :class:`UnifiedMessageBroker`, attaching it to *app.state*."""
     broker = UnifiedMessageBroker(
@@ -39,6 +40,7 @@ async def start_messaging(
         pull_batch=pull_batch,
         pull_timeout=pull_timeout,
         registry=registry,
+        queue_group=queue_group,
     )
     await broker.start()
     app.state.messaging_broker = broker
