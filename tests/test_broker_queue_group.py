@@ -7,11 +7,14 @@ cluster to stay fixed.
 """
 
 import asyncio
+from uuid import uuid4
 
 import pytest
+from nats.errors import NoServersError
 
 from unimessaging.broker.broker import UnifiedMessageBroker
 from unimessaging.broker.config import JetStreamConsumer
+from unimessaging.broker.registry import HandlerRegistry
 
 
 class FakeClient:
@@ -47,14 +50,23 @@ def _broker(**kwargs):
 
 
 @pytest.mark.asyncio
-async def test_empty_subjects_do_not_fall_back_to_the_notifications_tree():
-    broker, client = _broker(subjects=[], service_name="courses")
+@pytest.mark.parametrize("subjects", [None, [], ["", " "]])
+async def test_empty_subjects_do_not_fall_back_to_the_notifications_tree(subjects):
+    broker, client = _broker(subjects=subjects, service_name="courses")
     await broker.start()
     assert broker.subjects == []
     assert client.subscribes == []
     # Still connected: a broker with nothing inbound may still publish or serve
     # RPC, and an unconnected client fails on None at the first call.
     assert client.started is True
+
+
+@pytest.mark.asyncio
+async def test_omitted_subjects_do_not_fall_back_to_the_notifications_tree():
+    broker, client = _broker(service_name="courses")
+    await broker.start()
+    assert broker.subjects == []
+    assert client.subscribes == []
 
 
 @pytest.mark.asyncio
@@ -102,3 +114,76 @@ async def test_a_service_with_only_durables_still_starts_them():
         "courses-orders-order-consumer"
     ]
     await broker.stop()
+
+
+async def _live_brokers(subject, *, registries=None):
+    brokers = [
+        UnifiedMessageBroker(
+            subjects=[subject] if registries else [],
+            service_name="queue-transport-itest",
+            url="nats://localhost:4222",
+            registry=registry,
+        )
+        for registry in (registries or [None, None])
+    ]
+    try:
+        for broker in brokers:
+            await broker.start()
+        for broker in brokers:
+            await broker.client.adapter.nc.flush()
+    except NoServersError as exc:
+        for broker in brokers:
+            if broker._started:
+                await broker.stop()
+        pytest.skip(f"nats-server unavailable at nats://localhost:4222: {exc}")
+    return brokers
+
+
+@pytest.mark.asyncio
+async def test_live_same_queue_subscribers_process_each_message_once():
+    subject = f"itest.queue.subscribe.{uuid4().hex}"
+    received = []
+    complete = asyncio.Event()
+
+    async def handler(payload, _subject):
+        received.append(payload["sequence"])
+        if len(received) == 20:
+            complete.set()
+
+    registries = [HandlerRegistry(), HandlerRegistry()]
+    for registry in registries:
+        registry.register_handler(subject, handler)
+    brokers = await _live_brokers(subject, registries=registries)
+    try:
+        for sequence in range(20):
+            await brokers[0].publish(subject, {"sequence": sequence})
+        await brokers[0].client.adapter.nc.flush()
+        await asyncio.wait_for(complete.wait(), timeout=2)
+        await asyncio.sleep(0.05)
+        assert sorted(received) == list(range(20))
+    finally:
+        for broker in brokers:
+            await broker.stop()
+
+
+@pytest.mark.asyncio
+async def test_live_same_queue_responders_handle_one_request_once():
+    subject = f"itest.queue.reply.{uuid4().hex}"
+    calls = []
+
+    async def handler(payload, _meta):
+        calls.append(payload)
+        return {"handled": True}
+
+    brokers = await _live_brokers(subject)
+    try:
+        for broker in brokers:
+            await broker.reply(subject, handler)
+            await broker.client.adapter.nc.flush()
+        response = await brokers[0].client.request(subject, {"request": 1}, timeout=2)
+        await asyncio.sleep(0.05)
+        assert response["data"] == b'{"handled": true}'
+        assert calls == [{"request": 1}]
+    finally:
+        for broker in brokers:
+            await broker.stop()
