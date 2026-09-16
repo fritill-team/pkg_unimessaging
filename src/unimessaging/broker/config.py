@@ -11,6 +11,14 @@ class JetStreamConsumer:
     label: str
     subject: str
     durable: str
+    # Pins where a *newly created* durable starts reading ("all"/"new"/"last"/…);
+    # only applied at consumer creation, so an existing durable keeps its stored
+    # policy and None preserves the historical bare bind. The estate:AD-15
+    # collapses rename durables (a rename == a new consumer), and set this to
+    # "new"/"last" so the fresh durable does not replay the whole retained stream
+    # through already-collapsed handlers. Not settable via parse_many's env DSL
+    # yet — construct the consumer in code to pin it.
+    deliver_policy: Optional[str] = None
 
     @staticmethod
     def parse_many(raw_items: List[str]) -> List["JetStreamConsumer"]:

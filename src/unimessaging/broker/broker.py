@@ -177,6 +177,7 @@ class UnifiedMessageBroker:
                 handler=_on_message,
                 batch=self._pull_batch,
                 timeout=self._pull_timeout,
+                deliver_policy=consumer.deliver_policy,
             )
         except asyncio.CancelledError:
             raise

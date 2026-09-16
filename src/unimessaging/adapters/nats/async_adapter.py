@@ -10,9 +10,12 @@ from unimessaging.broker.config import MessagingConfig
 try:
     from nats.aio.client import Client as NATS
     from nats.errors import TimeoutError as NATSTimeout
+    from nats.js.api import ConsumerConfig, DeliverPolicy
 except ModuleNotFoundError as _exc:
     NATS = None  # type: ignore[assignment,misc]
     NATSTimeout = None  # type: ignore[assignment,misc]
+    ConsumerConfig = None  # type: ignore[assignment,misc]
+    DeliverPolicy = None  # type: ignore[assignment,misc]
     _IMPORT_ERROR = _exc
 else:
     _IMPORT_ERROR = None
@@ -241,12 +244,36 @@ class NATSAdapter:
         handler: MessageHandler,
         batch: int = 10,
         timeout: float = 1.0,
+        deliver_policy: Optional[str] = None,
     ) -> None:
+        """Bind a durable JetStream pull consumer and dispatch its messages.
+
+        ``deliver_policy`` pins where a *newly created* durable starts reading
+        (``"all"``, ``"new"``, ``"last"``, ``"last_per_subject"``, …). It takes
+        effect only at consumer creation — an already-existing durable keeps the
+        policy stored on the server — so it is a per-durable cutover control, not
+        a live re-position. Leaving it ``None`` preserves the historical bind:
+        nats-py applies its own default (``all``) when a fresh consumer is
+        created, and existing consumers are untouched, so no current consumer
+        changes behaviour.
+
+        The pin matters because a *renamed* durable is a brand-new consumer: the
+        ``estate:AD-15`` durable collapses rename durables, and without a pin the
+        new consumer would replay the whole retained stream through handlers that
+        have already deleted those rows. A collapse cutover passes
+        ``deliver_policy="new"`` (or ``"last"``) to start the fresh durable at the
+        stream head instead. See stories/estate/unimessaging-deliver-policy-pin.md.
+        """
         if not self.js:
             raise RuntimeError("JetStream not enabled")
+        config = None
+        if deliver_policy is not None:
+            config = ConsumerConfig(deliver_policy=DeliverPolicy(deliver_policy))
         while True:
             try:
-                sub = await self.js.pull_subscribe(subject, durable=durable)
+                sub = await self.js.pull_subscribe(
+                    subject, durable=durable, config=config
+                )
                 logger.info(
                     "JetStream consumer bound: subject=%s durable=%s batch=%d",
                     subject,
