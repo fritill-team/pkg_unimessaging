@@ -137,6 +137,51 @@ relay = OutboxRelay(
 task = asyncio.create_task(relay_loop(relay, poll_interval=0.5))
 ```
 
+### Running the relay as its own process
+
+The relay needs only a session factory and a publisher, so it can run outside the web
+process and scale separately from HTTP. The web pod reads the opt-out, and a separate
+entrypoint runs the relay:
+
+```python
+# infra/lifespan.py: skip the in-process relay only when it runs elsewhere
+from unimessaging.outbox import relay_in_process
+
+if relay_in_process():   # OUTBOX_RELAY_IN_PROCESS, default true
+    relay_task = asyncio.create_task(relay_loop(relay))
+
+# interface/cli/relay.py: the standalone entrypoint
+from unimessaging.outbox import run_standalone_relay
+
+asyncio.run(run_standalone_relay(
+    lambda messaging: ArticlesOutboxRelay(sessionmaker, messaging, subject_prefix="articles"),
+    service_name="articles",
+    url=settings.NATS_URL,
+    enable_durable=True,
+    stream_name=STREAM_NAME,            # same values the web pod passes;
+    stream_subjects=STREAM_SUBJECTS,    # the stream is created if absent
+    heartbeat_path="/tmp/outbox-relay.heartbeat",
+))
+```
+
+- `OUTBOX_RELAY_IN_PROCESS=false` means "the relay runs elsewhere", never "off". Only
+  `false`, `0`, `no`, `off` (case-insensitive) parse as false; anything unrecognised keeps
+  the relay in-process and logs a warning.
+- The runner's broker is publish-only: no subjects, no consumers, no handlers.
+- SIGTERM/SIGINT cancels the loop, lets the in-flight batch roll back (its rows are claimed
+  again later), stops the broker and returns. A row published but not yet marked is
+  published again: delivery is at-least-once.
+- Both relays may run at once (`SKIP LOCKED`), so cut over by starting the standalone relay
+  first and only then setting the flag to `false` on the web pod.
+- `relay_loop(..., on_tick=callback)` calls `callback` once per iteration; the runner uses
+  it to touch `heartbeat_path`. Probe it with an exec liveness check:
+
+```bash
+python -m unimessaging.outbox.healthcheck --path /tmp/outbox-relay.heartbeat --max-age 30
+```
+
+It exits 1 when the heartbeat is missing or older than `--max-age` seconds, 0 otherwise.
+
 ### Processing a Single Batch
 
 For testing or one-off processing, call `process_batch()` directly:

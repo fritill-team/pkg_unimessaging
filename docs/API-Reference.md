@@ -178,7 +178,7 @@ Frozen dataclass for NATS connection settings.
 > Requires the `outbox` extra: `pip install unimessaging[outbox]`
 
 **Module:** `unimessaging.outbox`
-**Import:** `from unimessaging.outbox import OutboxMixin, OutboxStatus, OutboxRepository, OutboxEventBus, OutboxRelay, relay_loop`
+**Import:** `from unimessaging.outbox import OutboxMixin, OutboxStatus, OutboxRepository, OutboxEventBus, OutboxRelay, relay_loop, run_standalone_relay, relay_in_process`
 
 ---
 
@@ -270,9 +270,9 @@ Rows are locked with `FOR UPDATE SKIP LOCKED` to allow concurrent relay instance
 
 ---
 
-## `async relay_loop(relay, *, poll_interval=0.5) -> None`
+## `async relay_loop(relay, *, poll_interval=0.5, on_tick=None) -> None`
 
-Run the relay in an infinite loop, sleeping `poll_interval` seconds when idle. Designed to be run as a background `asyncio.Task`. Cancel the task to stop gracefully.
+Run the relay in an infinite loop, sleeping `poll_interval` seconds when idle. Designed to be run as a background `asyncio.Task`. Cancel the task to stop gracefully. `on_tick`, if given, is called (sync or async) once at the start of every iteration; an exception from it is logged and does not stop the loop.
 
 ```python
 task = asyncio.create_task(relay_loop(relay))

@@ -18,10 +18,11 @@ up to ``max_retries`` before the row is marked ``FAILED``.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 try:
     from sqlalchemy import text
@@ -165,13 +166,29 @@ async def relay_loop(
     relay: OutboxRelay,
     *,
     poll_interval: float = 0.5,
+    on_tick: Optional[Callable[[], object]] = None,
 ) -> None:
     """Run the relay in an infinite loop, sleeping when idle.
 
     Designed to be run as a background ``asyncio.Task``.  Cancel the task
     to stop the loop gracefully.
+
+    *on_tick*, when given, is called once at the start of every iteration,
+    idle or not (it may return an awaitable).  The standalone runner uses it
+    to touch a liveness heartbeat.
     """
     while True:
+        if on_tick is not None:
+            # A failing tick must not stop publishing; a heartbeat that cannot
+            # be written goes stale, and the probe reports that on its own.
+            try:
+                result = on_tick()
+                if inspect.isawaitable(result):
+                    await result
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Outbox relay on_tick callback failed")
         try:
             count = await relay.process_batch()
             if count == 0:
