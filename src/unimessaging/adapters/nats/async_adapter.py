@@ -5,6 +5,7 @@ import json
 import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from unimessaging.adapters.nats.redact import mask_url
 from unimessaging.broker.config import MessagingConfig
 
 try:
@@ -46,7 +47,7 @@ class NATSAdapter:
             "NATS connecting: service=%s url=%s durable=%s "
             "max_reconnect=%s reconnect_wait=%s",
             self.cfg.name,
-            self.cfg.url,
+            mask_url(self.cfg.url),
             self.cfg.enable_durable,
             self.cfg.max_reconnect_attempts,
             self.cfg.reconnect_time_wait,
