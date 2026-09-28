@@ -44,6 +44,10 @@ async def start_messaging(
     pull_timeout: float = 1.0,
     registry: Optional[HandlerRegistry] = None,
     queue_group: Optional[str] = None,
+    user: Optional[str] = None,
+    password: Optional[str] = None,
+    token: Optional[str] = None,
+    creds_file: Optional[str] = None,
 ) -> UnifiedMessageBroker:
     """Create and start a :class:`UnifiedMessageBroker`, storing it at module level."""
     global _broker, _client
@@ -59,6 +63,10 @@ async def start_messaging(
         pull_timeout=pull_timeout,
         registry=registry,
         queue_group=queue_group,
+        user=user,
+        password=password,
+        token=token,
+        creds_file=creds_file,
     )
     await broker.start()
     _broker = broker

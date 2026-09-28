@@ -63,6 +63,14 @@ class MessagingConfig:
     max_inflight: int = 64
     default_headers: Dict[str, str] = field(default_factory=dict)
 
+    # Credentials outside the URL, each passed to connect() only when set.
+    # Precedence is nats-py's (2.13.1, client.py:1546-1571), not re-implemented
+    # here: creds_file wins, then user+password, then token, then URL userinfo.
+    user: Optional[str] = None
+    password: Optional[str] = None
+    token: Optional[str] = None
+    creds_file: Optional[str] = None
+
     # Reconnection
     max_reconnect_attempts: int = -1  # -1 = infinite
     reconnect_time_wait: float = 2.0  # seconds between reconnect attempts

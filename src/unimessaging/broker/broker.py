@@ -37,6 +37,10 @@ class UnifiedMessageBroker:
         registry: Optional[HandlerRegistry] = None,
         client: Optional[UnifiedMessaging] = None,
         queue_group: Optional[str] = None,
+        user: Optional[str] = None,
+        password: Optional[str] = None,
+        token: Optional[str] = None,
+        creds_file: Optional[str] = None,
     ) -> None:
         # An empty subject list means "subscribe to nothing". This used to fall
         # back to ["notifications.>"], so any service that declared no core
@@ -68,6 +72,10 @@ class UnifiedMessageBroker:
             consumers=self._consumers,
             pull_batch=pull_batch,
             pull_timeout=pull_timeout,
+            user=user,
+            password=password,
+            token=token,
+            creds_file=creds_file,
         )
         self._started = False
 

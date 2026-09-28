@@ -61,6 +61,7 @@ class NATSAdapter:
             reconnected_cb=self._on_reconnected,
             closed_cb=self._on_closed,
             error_cb=self._on_error,
+            **self._auth_kwargs(),
         )
         if self.cfg.enable_durable:
             self.js = self.nc.jetstream()
@@ -326,7 +327,27 @@ class NATSAdapter:
         logger.warning("NATS closed: service=%s", self.cfg.name)
 
     async def _on_error(self, exc: Exception) -> None:
+        # nats-py lowercases the server's -ERR text before building the error.
+        if "permissions violation" in str(exc).lower():
+            logger.error(
+                "NATS permission violation: service=%s err=%s", self.cfg.name, exc
+            )
+            return
         logger.warning("NATS error: service=%s err=%s", self.cfg.name, exc)
+
+    def _auth_kwargs(self) -> Dict[str, Any]:
+        # Only set fields are passed, so a url-only config makes the same
+        # connect() call it always has.
+        kwargs: Dict[str, Any] = {}
+        if self.cfg.user is not None:
+            kwargs["user"] = self.cfg.user
+        if self.cfg.password is not None:
+            kwargs["password"] = self.cfg.password
+        if self.cfg.token is not None:
+            kwargs["token"] = self.cfg.token
+        if self.cfg.creds_file is not None:
+            kwargs["user_credentials"] = self.cfg.creds_file
+        return kwargs
 
     # ── Helpers ──────────────────────────────────────────────────────
 

@@ -104,6 +104,10 @@ async def start_messaging(
     url: str = "nats://localhost:4222",
     enable_durable: bool = False,
     registry: HandlerRegistry | None = None,
+    user: str | None = None,
+    password: str | None = None,
+    token: str | None = None,
+    creds_file: str | None = None,
 ) -> UnifiedMessageBroker
 ```
 
@@ -144,6 +148,27 @@ app = FastAPI(lifespan=lifespan)
 
 See [FastAPI Example](FastAPI-Example) for a full walkthrough.
 
+### NATS credentials
+
+Both integrations, `UnifiedMessageBroker` and `create_messaging_client` accept
+`user`, `password`, `token` and `creds_file`. Each reaches the NATS connection
+only when set, so a service that passes none of them connects exactly as before.
+Any left unset falls back to an env var; an empty value counts as unset:
+
+| Argument | Env var |
+|----------|---------|
+| `user` | `NATS_USER` |
+| `password` | `NATS_PASSWORD` |
+| `token` | `NATS_TOKEN` |
+| `creds_file` | `NATS_CREDS_FILE` (passed to nats-py as `user_credentials`) |
+
+With several set, nats-py decides (2.13.1): creds file, then user+password,
+then token, then credentials embedded in the URL. Keep `url` credential-free
+once the credentials move out of it. URLs are masked in every log line either way.
+
+A server `Permissions Violation` is logged at ERROR as `NATS permission
+violation`; other async errors stay at WARNING.
+
 ---
 
 ## Django Integration
@@ -163,6 +188,10 @@ async def start_messaging(
     url: str = "nats://localhost:4222",
     enable_durable: bool = False,
     registry: HandlerRegistry | None = None,
+    user: str | None = None,
+    password: str | None = None,
+    token: str | None = None,
+    creds_file: str | None = None,
 ) -> UnifiedMessageBroker
 ```
 
