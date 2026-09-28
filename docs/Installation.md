@@ -110,7 +110,7 @@ pip install -e ".[dev,all]"
 ```python
 import unimessaging
 print(unimessaging.__version__)
-# 0.6.0
+# 0.16.0 (read from the installed distribution metadata)
 ```
 
 ```python

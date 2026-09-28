@@ -1,6 +1,11 @@
 """Public API for the unimessaging package."""
 
-__version__ = "0.6.0"
+from importlib.metadata import PackageNotFoundError, version as _dist_version
+
+try:
+    __version__ = _dist_version("unimessaging")
+except PackageNotFoundError:  # running from a source tree that was never installed
+    __version__ = "0.0.0"
 
 # Domain
 from .domain.entities import Message

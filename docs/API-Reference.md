@@ -4,7 +4,7 @@ All public symbols are exported from the top-level `unimessaging` package.
 
 ```python
 import unimessaging
-print(unimessaging.__version__)  # "0.6.0"
+print(unimessaging.__version__)  # the installed distribution version, e.g. "0.16.0"
 print(unimessaging.__all__)
 ```
 
