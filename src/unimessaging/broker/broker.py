@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -97,6 +98,23 @@ class UnifiedMessageBroker:
         # below are simply empty. See B2b in
         # .agent/planning/replica-safety-nats-investigation.md.
         await self.client.start()
+        # Limits are applied here, not in the reconnecting fetch loop (which
+        # swallows and retries every error), so a refused in-place update fails
+        # boot while the old pod keeps serving.
+        try:
+            for consumer in self._consumers:
+                if consumer.limits is not None:
+                    await self.client.ensure_consumer_limits(
+                        consumer.subject,
+                        consumer.durable,
+                        consumer.limits,
+                        deliver_policy=consumer.deliver_policy,
+                    )
+        except BaseException:
+            # The original error is what must propagate, not a failing stop().
+            with contextlib.suppress(Exception):
+                await self.client.stop()
+            raise
         if not self.subjects and not self._consumers:
             logger.info("No subjects or consumers configured; nothing to listen on.")
         for subject in self.subjects:
@@ -193,6 +211,7 @@ class UnifiedMessageBroker:
                 # Only forwarded when set, so a client without the kwarg binds
                 # exactly as before.
                 **({"on_tick": self._on_tick} if self._on_tick is not None else {}),
+                **({"limits": consumer.limits} if consumer.limits is not None else {}),
             )
         except asyncio.CancelledError:
             raise

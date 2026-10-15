@@ -36,3 +36,6 @@ class UnifiedMessaging:
 
     async def pull_consume(self, *a: Any, **kw: Any) -> Any:
         return await self.adapter.pull_consume(*a, **kw)
+
+    async def ensure_consumer_limits(self, *a: Any, **kw: Any) -> Any:
+        return await self.adapter.ensure_consumer_limits(*a, **kw)

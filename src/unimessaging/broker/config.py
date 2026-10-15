@@ -1,7 +1,58 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
+
+
+def _is_finite_number(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+@dataclass(frozen=True)
+class RetryLimits:
+    """Opt-in redelivery bounds for one durable (estate:AD-22).
+
+    ``max_deliver`` and ``ack_wait`` (seconds) are set on the durable itself;
+    ``nak_delays`` are client-side ``nak(delay=)`` values for failed deliveries
+    1, 2, 3, …, the last reused for every later one. Server ``backoff`` is never
+    set: its first entry would replace ``ack_wait``.
+    """
+
+    max_deliver: int = 5
+    ack_wait: float = 60.0
+    nak_delays: Tuple[float, ...] = (1.0, 5.0, 30.0, 120.0)
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.max_deliver, bool)
+            or not isinstance(self.max_deliver, int)
+            or self.max_deliver <= 0
+        ):
+            raise ValueError(
+                f"max_deliver must be a positive int; got {self.max_deliver!r}"
+            )
+        if not _is_finite_number(self.ack_wait) or self.ack_wait <= 0:
+            raise ValueError(
+                f"ack_wait must be a finite positive number; got {self.ack_wait!r}"
+            )
+        if not isinstance(self.nak_delays, (tuple, list)):
+            raise ValueError(
+                f"nak_delays must be a tuple or list; got {self.nak_delays!r}"
+            )
+        delays = tuple(self.nak_delays)
+        if not delays:
+            raise ValueError("nak_delays must not be empty")
+        for d in delays:
+            if not _is_finite_number(d) or d < 0:
+                raise ValueError(
+                    f"nak_delays must be finite numbers >= 0; got {d!r}"
+                )
+        object.__setattr__(self, "nak_delays", delays)
 
 
 @dataclass
@@ -19,6 +70,10 @@ class JetStreamConsumer:
     # through already-collapsed handlers. Not settable via parse_many's env DSL
     # yet — construct the consumer in code to pin it.
     deliver_policy: Optional[str] = None
+    # None binds exactly as before (no max_deliver, immediate nak). When set,
+    # a new durable is created with the limits and an existing one is updated
+    # in place at broker start. Not settable via parse_many's env DSL.
+    limits: Optional[RetryLimits] = None
 
     @staticmethod
     def parse_many(raw_items: List[str]) -> List["JetStreamConsumer"]:

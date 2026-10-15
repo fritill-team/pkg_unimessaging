@@ -1,8 +1,9 @@
 """Async pub/sub broker infrastructure."""
 
+from ..adapters.nats.async_adapter import ConsumerLimitsRefused
 from .broker import UnifiedMessageBroker
 from .client import UnifiedMessaging
-from .config import JetStreamConsumer, MessagingConfig
+from .config import JetStreamConsumer, MessagingConfig, RetryLimits
 from .registry import (
     HandlerRegistry,
     register_handler,
@@ -17,9 +18,11 @@ from .utils import (
 )
 
 __all__ = [
+    "ConsumerLimitsRefused",
     "HandlerRegistry",
     "JetStreamConsumer",
     "MessagingConfig",
+    "RetryLimits",
     "UnifiedMessageBroker",
     "UnifiedMessaging",
     "build_notification_headers",

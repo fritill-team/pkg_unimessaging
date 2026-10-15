@@ -7,17 +7,21 @@ import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from unimessaging.adapters.nats.redact import mask_url
-from unimessaging.broker.config import MessagingConfig
+from unimessaging.broker.config import MessagingConfig, RetryLimits
 
 try:
     from nats.aio.client import Client as NATS
     from nats.errors import TimeoutError as NATSTimeout
     from nats.js.api import ConsumerConfig, DeliverPolicy
+    from nats.js.errors import APIError as JSAPIError
+    from nats.js.errors import NotFoundError as JSNotFoundError
 except ModuleNotFoundError as _exc:
     NATS = None  # type: ignore[assignment,misc]
     NATSTimeout = None  # type: ignore[assignment,misc]
     ConsumerConfig = None  # type: ignore[assignment,misc]
     DeliverPolicy = None  # type: ignore[assignment,misc]
+    JSAPIError = None  # type: ignore[assignment,misc]
+    JSNotFoundError = None  # type: ignore[assignment,misc]
     _IMPORT_ERROR = _exc
 else:
     _IMPORT_ERROR = None
@@ -25,6 +29,19 @@ else:
 logger = logging.getLogger("unimessaging.nats")
 
 MessageHandler = Callable[[bytes, Dict[str, Any]], Awaitable[None]]
+
+# Handler calls are cancelled at this fraction of the server's ack_wait, leaving
+# time for the nak or term to land before the server redelivers on its own.
+_HANDLER_CAP_RATIO = 0.8
+
+
+class ConsumerLimitsRefused(RuntimeError):
+    """The server refused to apply declared retry limits to an existing durable."""
+
+
+def _same_seconds(a: Optional[float], b: float) -> bool:
+    # The server stores ack_wait in nanoseconds; compare at that resolution.
+    return a is not None and round(a * 1e9) == round(b * 1e9)
 
 
 class NATSAdapter:
@@ -240,6 +257,86 @@ class NATSAdapter:
 
     # ── JetStream Pull Consumer ──────────────────────────────────────
 
+    async def ensure_consumer_limits(
+        self,
+        subject: str,
+        durable: str,
+        limits: RetryLimits,
+        deliver_policy: Optional[str] = None,
+    ) -> None:
+        """Apply ``limits`` to an existing durable in place.
+
+        The stored ``ConsumerConfig`` is re-submitted with only ``max_deliver``
+        and ``ack_wait`` changed, and only when either differs. A config built
+        from defaults would be refused for a durable stored with another
+        ``deliver_policy`` (it is not editable), and nats-py's ``pull_subscribe``
+        never updates an existing durable. A missing durable is left for
+        ``pull_consume`` to create with the limits. ``deliver_policy`` is never
+        changed on a stored durable; a declared value that differs from the
+        stored one is logged. A stored server ``backoff`` (forbidden by
+        estate:AD-22) or a refused update raises :class:`ConsumerLimitsRefused`.
+        """
+        if not self.js:
+            raise RuntimeError("JetStream not enabled")
+        try:
+            stream = await self.js.find_stream_name_by_subject(subject)
+        except JSNotFoundError:
+            logger.warning(
+                "JetStream limits skipped; stream not found: subject=%s durable=%s",
+                subject,
+                durable,
+            )
+            return
+        try:
+            info = await self.js.consumer_info(stream, durable)
+        except JSNotFoundError:
+            return
+        stored = info.config
+        if deliver_policy is not None and stored.deliver_policy is not None:
+            stored_policy = getattr(
+                stored.deliver_policy, "value", stored.deliver_policy
+            )
+            if stored_policy != deliver_policy:
+                logger.warning(
+                    "JetStream deliver_policy differs and is kept: durable=%s "
+                    "declared=%s stored=%s",
+                    durable,
+                    deliver_policy,
+                    stored_policy,
+                )
+        if stored.backoff:
+            raise ConsumerLimitsRefused(
+                f"durable {durable!r} on stream {stream!r} has server backoff set "
+                "(forbidden by estate:AD-22); retry limits not applied"
+            )
+        if stored.max_deliver == limits.max_deliver and _same_seconds(
+            stored.ack_wait, limits.ack_wait
+        ):
+            return
+        try:
+            await self.js.add_consumer(
+                stream,
+                config=stored.evolve(
+                    max_deliver=limits.max_deliver, ack_wait=limits.ack_wait
+                ),
+            )
+        except JSAPIError as exc:
+            raise ConsumerLimitsRefused(
+                f"server refused retry limits for durable {durable!r} on stream "
+                f"{stream!r} (max_deliver={limits.max_deliver}, "
+                f"ack_wait={limits.ack_wait}s): {exc}"
+            ) from exc
+        logger.info(
+            "JetStream limits applied in place: stream=%s durable=%s "
+            "max_deliver=%d ack_wait=%ss (was max_deliver=%s ack_wait=%ss)",
+            stream,
+            durable,
+            limits.max_deliver,
+            limits.ack_wait,
+            stored.max_deliver,
+            stored.ack_wait,
+        )
+
     async def pull_consume(
         self,
         subject: str,
@@ -249,6 +346,7 @@ class NATSAdapter:
         timeout: float = 1.0,
         deliver_policy: Optional[str] = None,
         on_tick: Optional[Callable[[], object]] = None,
+        limits: Optional[RetryLimits] = None,
     ) -> None:
         """Bind a durable JetStream pull consumer and dispatch its messages.
 
@@ -274,17 +372,59 @@ class NATSAdapter:
         loop itself is stuck. A raising callback is logged and consumption goes on.
         The callback must be cheap and non-blocking: a hung awaitable or a
         blocking call stalls this durable's loop.
+
+        ``limits``, when given, bounds redelivery (estate:AD-22): a newly
+        created durable gets ``max_deliver``/``ack_wait`` (an existing one is
+        updated by :meth:`ensure_consumer_limits`, which the broker awaits at
+        start), each handler call is preceded by ``in_progress()`` and capped
+        below the server's ``ack_wait``, a failure is nak'd with a client-side
+        delay, and a failure on the server's final delivery is ``term()``'d and
+        logged once. The decision reads the server's values, re-read on every
+        bind, not ``limits``; a mismatch is logged once per bind (a direct
+        caller must call :meth:`ensure_consumer_limits` for an existing
+        durable). Before each handler call every unsettled message left in the
+        fetched batch gets ``in_progress()``, so none reaches ``ack_wait``
+        while earlier ones run. A handler that swallows ``CancelledError`` is
+        not truly capped. Omitting ``limits`` binds and naks exactly as before.
         """
         if not self.js:
             raise RuntimeError("JetStream not enabled")
         config = None
-        if deliver_policy is not None:
+        if limits is not None:
+            config = ConsumerConfig(
+                max_deliver=limits.max_deliver, ack_wait=limits.ack_wait
+            )
+            if deliver_policy is not None:
+                config.deliver_policy = DeliverPolicy(deliver_policy)
+        elif deliver_policy is not None:
             config = ConsumerConfig(deliver_policy=DeliverPolicy(deliver_policy))
         while True:
             try:
                 sub = await self.js.pull_subscribe(
                     subject, durable=durable, config=config
                 )
+                server_max_deliver = 0
+                handler_cap = 0.0
+                if limits is not None:
+                    server_cfg = (await sub.consumer_info()).config
+                    server_max_deliver = server_cfg.max_deliver or 0
+                    handler_cap = _HANDLER_CAP_RATIO * (
+                        server_cfg.ack_wait or limits.ack_wait
+                    )
+                    if server_cfg.max_deliver != limits.max_deliver or not (
+                        _same_seconds(server_cfg.ack_wait, limits.ack_wait)
+                    ):
+                        logger.warning(
+                            "JetStream limits not applied on durable=%s: "
+                            "declared max_deliver=%d ack_wait=%ss, server "
+                            "max_deliver=%s ack_wait=%ss; call "
+                            "ensure_consumer_limits for an existing durable",
+                            durable,
+                            limits.max_deliver,
+                            limits.ack_wait,
+                            server_cfg.max_deliver,
+                            server_cfg.ack_wait,
+                        )
                 logger.info(
                     "JetStream consumer bound: subject=%s durable=%s batch=%d",
                     subject,
@@ -309,6 +449,22 @@ class NATSAdapter:
                     try:
                         msgs = await sub.fetch(batch, timeout=timeout)
                     except NATSTimeout:
+                        continue
+                    if limits is not None:
+                        for i, msg in enumerate(msgs):
+                            # Each handler is capped below ack_wait, so refreshing
+                            # every unsettled message before each call keeps a
+                            # queued one from expiring and being redelivered.
+                            for pending in msgs[i:]:
+                                await pending.in_progress()
+                            await self._handle_bounded(
+                                msg,
+                                durable,
+                                handler,
+                                limits,
+                                server_max_deliver,
+                                handler_cap,
+                            )
                         continue
                     for msg in msgs:
                         try:
@@ -337,6 +493,75 @@ class NATSAdapter:
                     exc,
                 )
                 await asyncio.sleep(self.cfg.pull_consumer_retry_delay)
+
+    async def _handle_bounded(
+        self,
+        msg: Any,
+        durable: str,
+        handler: MessageHandler,
+        limits: RetryLimits,
+        server_max_deliver: int,
+        handler_cap: float,
+    ) -> None:
+        # Never log the payload: it may carry learner data (estate:AD-20).
+        md = msg.metadata
+        delivered = md.num_delivered
+        seq = md.sequence.stream
+        # An unbounded server value (-1) never makes a delivery final.
+        final = server_max_deliver > 0 and delivered >= server_max_deliver
+        if final:
+            logger.warning(
+                "JetStream final delivery: stream=%s seq=%d subject=%s "
+                "durable=%s delivered=%d",
+                md.stream,
+                seq,
+                msg.subject,
+                durable,
+                delivered,
+            )
+        logger.debug(
+            "JetStream recv: subject=%s durable=%s bytes=%d",
+            msg.subject,
+            durable,
+            len(msg.data or b""),
+        )
+        try:
+            await asyncio.wait_for(
+                handler(msg.data, {"subject": msg.subject}), timeout=handler_cap
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if final:
+                # Logged before term() so a failing term() cannot lose the line.
+                logger.error(
+                    "JetStream message terminated: stream=%s seq=%d subject=%s "
+                    "durable=%s delivered=%d error=%s",
+                    md.stream,
+                    seq,
+                    msg.subject,
+                    durable,
+                    delivered,
+                    type(exc).__name__,
+                )
+                await msg.term()
+                return
+            delays = limits.nak_delays
+            delay = delays[min(delivered - 1, len(delays) - 1)]
+            logger.warning(
+                "JetStream nak: stream=%s seq=%d subject=%s durable=%s "
+                "delivered=%d delay=%ss error=%s",
+                md.stream,
+                seq,
+                msg.subject,
+                durable,
+                delivered,
+                delay,
+                type(exc).__name__,
+            )
+            await msg.nak(delay=delay)
+            return
+        await msg.ack()
 
     # ── Connection Lifecycle Callbacks ───────────────────────────────
 
