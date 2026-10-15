@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -247,6 +248,7 @@ class NATSAdapter:
         batch: int = 10,
         timeout: float = 1.0,
         deliver_policy: Optional[str] = None,
+        on_tick: Optional[Callable[[], object]] = None,
     ) -> None:
         """Bind a durable JetStream pull consumer and dispatch its messages.
 
@@ -265,6 +267,13 @@ class NATSAdapter:
         have already deleted those rows. A collapse cutover passes
         ``deliver_policy="new"`` (or ``"last"``) to start the fresh durable at the
         stream head instead. See stories/estate/unimessaging-deliver-policy-pin.md.
+
+        ``on_tick``, when given, is called at the top of every fetch iteration,
+        including iterations whose fetch times out empty (it may return an
+        awaitable), so a liveness heartbeat built on it goes stale only when the
+        loop itself is stuck. A raising callback is logged and consumption goes on.
+        The callback must be cheap and non-blocking: a hung awaitable or a
+        blocking call stalls this durable's loop.
         """
         if not self.js:
             raise RuntimeError("JetStream not enabled")
@@ -283,6 +292,20 @@ class NATSAdapter:
                     batch,
                 )
                 while True:
+                    if on_tick is not None:
+                        # A failing tick must not stop consumption; a heartbeat
+                        # that cannot be written goes stale on its own.
+                        try:
+                            result = on_tick()
+                            if inspect.isawaitable(result):
+                                await result
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            logger.exception(
+                                "JetStream on_tick callback failed: durable=%s",
+                                durable,
+                            )
                     try:
                         msgs = await sub.fetch(batch, timeout=timeout)
                     except NATSTimeout:

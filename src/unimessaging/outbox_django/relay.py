@@ -60,7 +60,7 @@ class DjangoOutboxRelay:
     Parameters
     ----------
     messaging:
-        Any object with an async ``publish(subject, data)`` method
+        Any object with an async ``publish(subject, data, headers=...)`` method
         (e.g. ``UnifiedMessaging``).
     subject_prefix:
         Prefix prepended to ``aggregate_type`` to form the NATS subject.
@@ -95,6 +95,10 @@ class DjangoOutboxRelay:
     def _build_subject(self, aggregate_type: str) -> str:
         return f"{self._subject_prefix}.{aggregate_type}"
 
+    def _build_headers(self, row) -> dict[str, str]:
+        # The outbox row id is the JetStream de-duplication key (estate:AD-22).
+        return {"Nats-Msg-Id": str(row["id"])}
+
     def process_batch(self, batch_size: int = DEFAULT_BATCH_SIZE) -> int:
         """Process up to *batch_size* pending outbox rows.
 
@@ -119,7 +123,9 @@ class DjangoOutboxRelay:
                     subject = self._build_subject(r["aggregate_type"])
                     data = json.dumps(r["payload"]).encode()
                     loop.run_until_complete(
-                        self._messaging.publish(subject, data)
+                        self._messaging.publish(
+                            subject, data, headers=self._build_headers(r)
+                        )
                     )
                     cursor.execute(self._mark_published_sql, [r["id"]])
                     published += 1

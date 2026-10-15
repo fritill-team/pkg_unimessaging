@@ -73,7 +73,7 @@ class OutboxRelay:
     session_factory:
         An ``async_sessionmaker`` used to create DB sessions.
     messaging:
-        Any object with an async ``publish(subject, data)`` method
+        Any object with an async ``publish(subject, data, headers=...)`` method
         (e.g. ``UnifiedMessaging``).
     subject_prefix:
         Prefix prepended to ``aggregate_type`` to form the NATS subject.
@@ -110,6 +110,12 @@ class OutboxRelay:
     def _build_subject(self, aggregate_type: str) -> str:
         return f"{self._subject_prefix}.{aggregate_type}"
 
+    def _build_headers(self, row) -> dict[str, str]:
+        # The outbox row id is the JetStream de-duplication key: a crash between
+        # publish and commit republishes the batch, and the stream drops the
+        # repeats inside its duplicate window (estate:AD-22).
+        return {"Nats-Msg-Id": str(row["id"])}
+
     async def process_batch(self, batch_size: int = DEFAULT_BATCH_SIZE) -> int:
         """Process up to *batch_size* pending outbox rows.
 
@@ -130,7 +136,9 @@ class OutboxRelay:
                     try:
                         subject = self._build_subject(r["aggregate_type"])
                         data = json.dumps(r["payload"]).encode()
-                        await self._messaging.publish(subject, data)
+                        await self._messaging.publish(
+                            subject, data, headers=self._build_headers(r)
+                        )
 
                         await session.execute(
                             self._mark_published_sql, {"id": r["id"]}

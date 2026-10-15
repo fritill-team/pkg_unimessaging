@@ -41,6 +41,7 @@ class UnifiedMessageBroker:
         password: Optional[str] = None,
         token: Optional[str] = None,
         creds_file: Optional[str] = None,
+        on_tick: Optional[Callable[[], object]] = None,
     ) -> None:
         # An empty subject list means "subscribe to nothing". This used to fall
         # back to ["notifications.>"], so any service that declared no core
@@ -62,6 +63,9 @@ class UnifiedMessageBroker:
         self._consumers = consumers or []
         self._pull_batch = pull_batch
         self._pull_timeout = pull_timeout
+        # Fired once per fetch iteration of every durable's pull loop; a
+        # consumer process uses it to touch its liveness heartbeat.
+        self._on_tick = on_tick
         self._consumer_tasks: List[asyncio.Task] = []
         self.client = client or create_messaging_client(
             service_name,
@@ -186,6 +190,9 @@ class UnifiedMessageBroker:
                 batch=self._pull_batch,
                 timeout=self._pull_timeout,
                 deliver_policy=consumer.deliver_policy,
+                # Only forwarded when set, so a client without the kwarg binds
+                # exactly as before.
+                **({"on_tick": self._on_tick} if self._on_tick is not None else {}),
             )
         except asyncio.CancelledError:
             raise

@@ -452,7 +452,7 @@ async def test_sigterm_mid_batch_releases_the_claim_and_the_row_is_published_lat
         def __init__(self, inner):
             self.inner = inner
 
-        async def publish(self, subject, data):
+        async def publish(self, subject, data, headers=None):
             in_publish.set()
             await asyncio.sleep(3600)
 
