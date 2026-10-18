@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import logging
 
+import nats
 import pytest
 from nats.js.api import AckPolicy, DeliverPolicy
 from nats.js.client import JetStreamContext
@@ -607,3 +608,135 @@ async def test_broker_never_ensures_limits_for_unbounded_consumers():
         assert "limits" not in client.pull_consumes[0]
     finally:
         await broker.stop()
+
+
+@pytest.mark.asyncio
+async def test_limits_skipped_when_jetstream_disabled(nats_server, caplog):
+    received = []
+
+    async def on_ping(*args):
+        received.append(args)
+
+    registry = HandlerRegistry()
+    registry.register_handler("core.ping", on_ping)
+    caplog.set_level(logging.WARNING, logger="unimessaging.nats")
+    broker = UnifiedMessageBroker(
+        service_name="retry-core",
+        url=nats_server,
+        enable_durable=False,
+        subjects=["core.ping"],
+        consumers=[
+            JetStreamConsumer(
+                label="retry", subject=SUBJECT, durable=DURABLE, limits=RetryLimits()
+            )
+        ],
+        registry=registry,
+    )
+    await broker.start()
+    try:
+        nc = await nats.connect(nats_server)
+        try:
+            await nc.publish("core.ping", b'{"ok": true}')
+            await nc.flush()
+            await _wait_for(lambda: received)
+        finally:
+            await nc.close()
+    finally:
+        # The durable's pull task died on "JetStream not enabled", with or
+        # without limits; stop() re-raises it. Start and core delivery are the
+        # behaviour under test.
+        with contextlib.suppress(RuntimeError):
+            await broker.stop()
+    assert any(
+        "JetStream not enabled" in r.getMessage() and DURABLE in r.getMessage()
+        for r in caplog.records
+    )
+
+
+# ── Settle failures (no server) ──────────────────────────────────────
+
+
+class _FakeMeta:
+    def __init__(self, seq):
+        self.num_delivered = 1
+        self.stream = STREAM
+        self.sequence = type("Seq", (), {"stream": seq})()
+
+
+class _FakeMsg:
+    def __init__(self, seq, fail=()):
+        self.subject = SUBJECT
+        self.data = b"{}"
+        self.metadata = _FakeMeta(seq)
+        self._fail = set(fail)
+        self.settled = []
+
+    async def _op(self, name):
+        if name in self._fail:
+            raise ConnectionError(name)
+        self.settled.append(name)
+
+    async def in_progress(self):
+        await self._op("in_progress")
+
+    async def ack(self):
+        await self._op("ack")
+
+    async def nak(self, delay=None):
+        await self._op("nak")
+
+    async def term(self):
+        await self._op("term")
+
+
+class _FakeSub:
+    def __init__(self, batches):
+        self._batches = list(batches)
+
+    async def consumer_info(self):
+        cfg = type("Cfg", (), {"max_deliver": 5, "ack_wait": 60.0})()
+        return type("Info", (), {"config": cfg})()
+
+    async def fetch(self, batch, timeout=None):
+        if self._batches:
+            return self._batches.pop(0)
+        await asyncio.sleep(3600)
+
+
+class _FakeJS:
+    def __init__(self, sub):
+        self._sub = sub
+        self.subscribes = 0
+
+    async def pull_subscribe(self, subject, durable=None, config=None):
+        self.subscribes += 1
+        return self._sub
+
+
+@pytest.mark.asyncio
+async def test_failed_settle_does_not_abandon_the_batch(caplog):
+    first = _FakeMsg(1, fail={"ack", "in_progress"})
+    second = _FakeMsg(2)
+    m = UnifiedMessaging(MessagingConfig(url="nats://unused", name="settle-test"))
+    js = _FakeJS(_FakeSub([[first, second]]))
+    m.adapter.js = js
+    handled = []
+
+    async def handler(data, meta):
+        handled.append(meta)
+
+    caplog.set_level(logging.WARNING, logger="unimessaging.nats")
+    task = asyncio.create_task(
+        m.adapter.pull_consume(SUBJECT, DURABLE, handler, limits=RetryLimits())
+    )
+    try:
+        await _wait_for(lambda: "ack" in second.settled)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    assert len(handled) == 2
+    assert js.subscribes == 1
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not any("consumer reset" in t for t in msgs)
+    assert any("JetStream ack failed" in t and "seq=1" in t for t in msgs)

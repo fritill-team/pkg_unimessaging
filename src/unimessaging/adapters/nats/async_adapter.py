@@ -275,9 +275,16 @@ class NATSAdapter:
         changed on a stored durable; a declared value that differs from the
         stored one is logged. A stored server ``backoff`` (forbidden by
         estate:AD-22) or a refused update raises :class:`ConsumerLimitsRefused`.
+        With JetStream disabled there is no durable to bound; the call warns and
+        returns so the broker still serves its core subjects.
         """
         if not self.js:
-            raise RuntimeError("JetStream not enabled")
+            logger.warning(
+                "JetStream limits skipped; JetStream not enabled: subject=%s durable=%s",
+                subject,
+                durable,
+            )
+            return
         try:
             stream = await self.js.find_stream_name_by_subject(subject)
         except JSNotFoundError:
@@ -456,7 +463,7 @@ class NATSAdapter:
                             # every unsettled message before each call keeps a
                             # queued one from expiring and being redelivered.
                             for pending in msgs[i:]:
-                                await pending.in_progress()
+                                await self._settle(pending, durable, "in_progress")
                             await self._handle_bounded(
                                 msg,
                                 durable,
@@ -544,7 +551,7 @@ class NATSAdapter:
                     delivered,
                     type(exc).__name__,
                 )
-                await msg.term()
+                await self._settle(msg, durable, "term")
                 return
             delays = limits.nak_delays
             delay = delays[min(delivered - 1, len(delays) - 1)]
@@ -559,9 +566,27 @@ class NATSAdapter:
                 delay,
                 type(exc).__name__,
             )
-            await msg.nak(delay=delay)
+            await self._settle(msg, durable, "nak", delay=delay)
             return
-        await msg.ack()
+        await self._settle(msg, durable, "ack")
+
+    @staticmethod
+    async def _settle(msg: Any, durable: str, op: str, **kwargs: Any) -> None:
+        # A failed settle must not abandon the rest of the batch: those messages
+        # would wait out ack_wait and each redelivery would spend max_deliver.
+        try:
+            await getattr(msg, op)(**kwargs)
+        except Exception as exc:
+            md = msg.metadata
+            logger.warning(
+                "JetStream %s failed: stream=%s seq=%d subject=%s durable=%s error=%s",
+                op,
+                md.stream,
+                md.sequence.stream,
+                msg.subject,
+                durable,
+                type(exc).__name__,
+            )
 
     # ── Connection Lifecycle Callbacks ───────────────────────────────
 
