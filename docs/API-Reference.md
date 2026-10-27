@@ -245,7 +245,7 @@ Serialize and write multiple events.
 
 ---
 
-## `OutboxRelay(session_factory, messaging, *, subject_prefix, table_name="outbox", max_retries=10, base_backoff=5)`
+## `OutboxRelay(session_factory, messaging, *, subject_prefix, table_name="outbox", max_retries=10, base_backoff=5, verbatim_namespaces=())`
 
 Polls a PostgreSQL outbox table for pending rows and publishes them via a messaging backend.
 
@@ -259,6 +259,7 @@ Polls a PostgreSQL outbox table for pending rows and publishes them via a messag
 | `table_name` | `str` | `"outbox"` | Name of the outbox table |
 | `max_retries` | `int` | `10` | Max attempts before marking a row `FAILED` |
 | `base_backoff` | `int` | `5` | Base delay in seconds for exponential back-off |
+| `verbatim_namespaces` | `Iterable[str]` | `()` | Namespaces published without the prefix: an `aggregate_type` equal to a namespace or starting with `<namespace>.` is the whole subject (e.g. `("notifications",)` sends `notifications.trigger.<key>` as is). Empty entry raises `ValueError`; a bare `str` or a non-`str` entry raises `TypeError` |
 
 **Methods:**
 
@@ -338,7 +339,7 @@ Serialize and write multiple events (sync).
 
 ---
 
-## `DjangoOutboxRelay(messaging, *, subject_prefix, table_name="outbox", max_retries=10, base_backoff=5)`
+## `DjangoOutboxRelay(messaging, *, subject_prefix, table_name="outbox", max_retries=10, base_backoff=5, verbatim_namespaces=())`
 
 Polls the outbox table using raw SQL and publishes rows via async messaging, bridging sync DB operations with async NATS publishing.
 
@@ -351,6 +352,7 @@ Polls the outbox table using raw SQL and publishes rows via async messaging, bri
 | `table_name` | `str` | `"outbox"` | Name of the outbox table |
 | `max_retries` | `int` | `10` | Max attempts before marking `FAILED` |
 | `base_backoff` | `int` | `5` | Base delay in seconds for exponential back-off |
+| `verbatim_namespaces` | `Iterable[str]` | `()` | Namespaces published without the prefix: an `aggregate_type` equal to a namespace or starting with `<namespace>.` is the whole subject (e.g. `("notifications",)` sends `notifications.trigger.<key>` as is). Empty entry raises `ValueError`; a bare `str` or a non-`str` entry raises `TypeError` |
 
 **Methods:**
 

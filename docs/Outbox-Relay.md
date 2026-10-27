@@ -131,6 +131,7 @@ relay = OutboxRelay(
     table_name="outbox",            # default: "outbox"
     max_retries=10,                 # default: 10 — FAILED after this many attempts
     base_backoff=5,                 # default: 5 seconds — exponential: 5, 10, 20, 40, ...
+    verbatim_namespaces=(),         # default: none — see "Verbatim namespaces"
 )
 
 # Poll interval is configured on the loop
@@ -201,6 +202,31 @@ The relay builds NATS subjects as `{subject_prefix}.{aggregate_type}`:
 | `"articles"` | `"therapy_session"` | `articles.therapy_session` |
 | `"articles"` | `"article"` | `articles.article` |
 | `"reservations"` | `"slot"` | `reservations.slot` |
+
+### Verbatim namespaces
+
+Pass `verbatim_namespaces` to publish some rows under their `aggregate_type` alone,
+without the prefix. A row matches when its `aggregate_type` equals a namespace or
+starts with `<namespace>.`; matching is on whole dot-separated tokens. Both relays
+take the option, and `Nats-Msg-Id` is still the row id.
+
+```python
+relay = OutboxRelay(
+    session_factory, messaging,
+    subject_prefix="articles",
+    verbatim_namespaces=("notifications",),
+)
+```
+
+| `aggregate_type` | NATS Subject |
+|------------------|--------------|
+| `"notifications.trigger.article_published"` | `notifications.trigger.article_published` |
+| `"notifications.registry.articles"` | `notifications.registry.articles` |
+| `"article.published"` | `articles.article.published` |
+| `"notificationsx.y"` | `articles.notificationsx.y` |
+
+A trailing `.` on a namespace is ignored (`"notifications."` = `"notifications"`); an
+empty namespace raises `ValueError`, and a bare string or a non-string entry raises `TypeError`. Without the option, every subject is prefixed.
 
 Subscribers use standard NATS wildcard patterns:
 
@@ -354,6 +380,7 @@ relay = DjangoOutboxRelay(
     table_name="outbox",               # default: "outbox"
     max_retries=10,                    # default: 10 — FAILED after this many attempts
     base_backoff=5,                    # default: 5 seconds — exponential: 5, 10, 20, ...
+    verbatim_namespaces=(),            # default: none — same rule as OutboxRelay
 )
 ```
 
