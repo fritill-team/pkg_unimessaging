@@ -22,7 +22,7 @@ import inspect
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 try:
     from sqlalchemy import text
@@ -65,6 +65,20 @@ WHERE id=:id
 """
 
 
+def _normalise_namespaces(namespaces: Iterable[str]) -> tuple[str, ...]:
+    if isinstance(namespaces, (str, bytes)):
+        raise TypeError("verbatim_namespaces must be an iterable of strings, not a str")
+    out = []
+    for ns in namespaces:
+        if not isinstance(ns, str):
+            raise TypeError("verbatim_namespaces entries must be str")
+        ns = ns.rstrip(".")
+        if not ns:
+            raise ValueError("verbatim_namespaces entries must be non-empty")
+        out.append(ns)
+    return tuple(out)
+
+
 class OutboxRelay:
     """Polls outbox rows and publishes them to a messaging backend.
 
@@ -84,6 +98,12 @@ class OutboxRelay:
         Max publish attempts before marking a row ``FAILED``.
     base_backoff:
         Base delay (seconds) for exponential back-off between retries.
+    verbatim_namespaces:
+        Namespaces published without the prefix.  A row whose
+        ``aggregate_type`` equals a namespace or starts with ``<namespace>.``
+        is published under ``aggregate_type`` alone, e.g.
+        ``("notifications",)`` sends ``notifications.trigger.<key>`` as is.
+        Matching is on whole dot-separated tokens.  Defaults to none.
     """
 
     def __init__(
@@ -95,10 +115,12 @@ class OutboxRelay:
         table_name: str = DEFAULT_TABLE_NAME,
         max_retries: int = DEFAULT_MAX_RETRIES,
         base_backoff: int = DEFAULT_BASE_BACKOFF,
+        verbatim_namespaces: Iterable[str] = (),
     ) -> None:
         self._session_factory = session_factory
         self._messaging = messaging
         self._subject_prefix = subject_prefix
+        self._verbatim_namespaces = _normalise_namespaces(verbatim_namespaces)
         self._max_retries = max_retries
         self._base_backoff = base_backoff
 
@@ -108,6 +130,9 @@ class OutboxRelay:
         self._mark_retry_sql = text(_MARK_RETRY_TEMPLATE.format(table=table_name))
 
     def _build_subject(self, aggregate_type: str) -> str:
+        for ns in self._verbatim_namespaces:
+            if aggregate_type == ns or aggregate_type.startswith(ns + "."):
+                return aggregate_type
         return f"{self._subject_prefix}.{aggregate_type}"
 
     def _build_headers(self, row) -> dict[str, str]:
